@@ -3,20 +3,9 @@ import pandas as pd
 from bs4 import BeautifulSoup
 import random
 import time
+import datetime
 
 
-
-# per_page = 100 # Количество вакансий на странице
-# search_queries = ['Аналитик', 'Инженер данных']  # Список текстов для поиска
-# area = 1 # Регион (1 - Москва)
-# period = 1 № Период (Количество дней, в пределах которых производится поиск по вакансиям)
-# pages_to_parse = 15 # Количество страницдля парсинга
-# field # Поле, в котором выбираем где упоминается вакансия:
-    #name
-    #company_name
-    #descriptoion
-    #all
-#skill_search = True нужны ли скилы в вакансии
 
 
 def find_proxy():
@@ -106,27 +95,26 @@ def query(per_page, search_queries, area, period, pages_to_parse, search_field, 
 
     return frames
 
-import datetime
-import pandas as pd
 
-def df_main(frames):
+
+def df_main(frames, desired_columns=None):
     if not frames:
         print("Нет данных для сохранения.")
         return pd.DataFrame()
 
     df = pd.DataFrame(frames)
 
-    # Нормализация известных столбцов-словарей
+    
     dict_columns = ['employer', 'area', 'salary', 'type', 'schedule', 'experience', 'employment']
     for col in dict_columns:
         if col in df.columns:
-            # Извлекаем данные из словарей, заполняем пропуски
+            
             norm = pd.json_normalize(df[col].dropna().tolist())
             if not norm.empty:
                 norm.columns = [f"{col}_{subcol}" for subcol in norm.columns]
                 df = df.drop(columns=[col]).join(norm, how='left')
 
-    # Обработка professional_roles (список словарей)
+    
     if 'professional_roles' in df.columns:
         df['professional_roles_id'] = df['professional_roles'].apply(
             lambda x: x[0]['id'] if x and isinstance(x, list) and len(x) > 0 else None
@@ -136,29 +124,16 @@ def df_main(frames):
         )
         df = df.drop(columns=['professional_roles'])
 
-    # Удаляем оставшиеся столбцы-списки/словари, если они не были нормализованы
-    for col in df.columns:
-        if df[col].dropna().apply(lambda x: isinstance(x, (dict, list))).any():
-            df = df.drop(columns=[col])
-            print(f"Столбец {col} удалён (содержит неразвернутые структуры).")
+    if desired_columns:
+        existing = [col for col in desired_columns if col in df.columns]
+        df = df[existing]
+        print(f"Оставленные колонки: {existing}")
 
-    # Сохранение
     filename = f"vacancies_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     df.to_csv(filename, index=False)
     print(f"✅ Данные сохранены в {filename}")
     return df
 
-    # per_page = 100#100  # Количество вакансий на странице
-    # search_queries = ['Аналитик','Юрист']  # Список текстов для поиска
-    # area = 1  # Регион (1 - Москва)
-    # period = 1  # Период (количество дней)
-    # pages_to_parse = 15 #15 # Количество страниц для парсинга
-    # field = Используйте параметр field со значением name (или company_name для поиска по названию компании).Другие варианты уточнения поиска:
-        # name	В названии вакансии 
-        # company_name В названии компании 
-        # description	В описании вакансии (по умолчанию)
-        # all	Во всех полях
-    #skills_search = True нужны ли skills в вакансии?
 
 per_page = 50
 search_queries = ['Аналитик']
@@ -166,10 +141,54 @@ area = 1
 period = 1
 pages_to_parse = 1
 search_field = 'name'          
-skills_search = False
+skills_search = True
 
+all_possible_columns = [
+    'id', 'premium', 'name', 'department', 'has_test', 'response_letter_required', 
+    'salary_range', 'address', 'response_url', 'sort_point_distance', 'published_at', 
+    'created_at', 'archived', 'apply_alternate_url', 'branding', 'show_logo_in_search', 
+    'show_contacts', 'insider_interview', 'url', 'alternate_url', 'relations', 
+    'snippet', 'contacts', 'working_days', 'working_time_intervals', 'working_time_modes', 
+    'accept_temporary', 'fly_in_fly_out_duration', 'work_format', 'working_hours', 
+    'work_schedule_by_days', 'accept_labor_contract', 'civil_law_contracts', 'night_shifts', 
+    'accept_incomplete_resumes', 'employment_form', 'internship', 'adv_response_url', 
+    'is_adv_vacancy', 'adv_context', 'key_skills', 'search_query', 'employer_id', 
+    'employer_name', 'employer_url', 'employer_alternate_url', 'employer_vacancies_url', 
+    'employer_country_id', 'employer_accredited_it_employer', 'employer_trusted', 
+    'employer_logo_urls.original', 'employer_logo_urls.90', 'employer_logo_urls.240', 
+    'employer_logo_urls', 'area_id', 'area_name', 'area_url', 'salary_from', 'salary_to', 
+    'salary_currency', 'salary_gross', 'type_id', 'type_name', 'schedule_id', 'schedule_name', 
+    'experience_id', 'experience_name', 'employment_id', 'employment_name', 
+    'professional_roles_id', 'professional_roles_name'
+]
+
+
+desired_columns = [
+    'id',                          # уникальный идентификатор вакансии
+    'name',                        # название вакансии
+    'published_at',                # дата публикации
+    'created_at',                  # дата создания
+    'alternate_url',               # ссылка на вакансию
+    'employer_id',                 # id работодателя
+    'employer_name',               # название компании
+    'employer_trusted',            # доверенный работодатель
+    'area_name',                   # название региона
+    'salary_from',                 # зарплата от
+    'salary_to',                   # зарплата до
+    'salary_currency',             # валюта
+    'salary_gross',                # до вычета налогов или после
+    'experience_id',               # id требуемого опыта
+    'experience_name',             # требуемый опыт
+    'employment_id',               # id типа занятости
+    'employment_name',             # тип занятости
+    'schedule_id',                 # id графика работы
+    'schedule_name',               # график работы
+    'professional_roles_name',     # проф. роль
+    'key_skills',                  # ключевые навыки
+    'snippet',                     # требования/обязанности (кратко)
+]
 result = query(per_page, search_queries, area, period, pages_to_parse, search_field, skills_search)
-df = df_main(result)
+df = df_main(result, desired_columns)
 
 
 

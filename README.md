@@ -12,17 +12,17 @@
 ## Установка
 
 1. Клонируйте репозиторий:
-   ```bash
-   git clone https://github.com/mihail-andreev/hh.git
-   cd hh
-
+    ```bash
+    git clone https://github.com/mihail-andreev/hh.git
+    cd hh
+    ```
 2. Создайте и активируйте виртуальное окружение (рекомендуется):
-
-python -m venv venv
-source venv/bin/activate  # для Linux/macOS
-venv\Scripts\activate     # для Windows
-
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # для Linux/macOS
+    venv\Scripts\activate     # для Windows
+    ```
 3. Установите зависимости:
-
-pip install -r requirements.txt
-
+    ```bash
+    pip install -r requirements.txt
+    ```
