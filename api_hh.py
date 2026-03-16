@@ -1,60 +1,94 @@
 import requests
 import pandas as pd
+import numpy as np
 from bs4 import BeautifulSoup
 import random
 import time
 import datetime
+import psycopg2
+import logging
+from config import DB_CONFIG
 
 
-
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def find_proxy():
+    """Получение списка прокси с таймаутом и обработкой ошибок"""
     url = "https://free-proxy-list.net"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
+    except requests.exceptions.Timeout:
+        logging.warning("Таймаут при получении списка прокси")
+        return []
     except Exception as e:
-        print(f"Ошибка получения списка прокси: {e}")
+        logging.warning(f"Ошибка получения списка прокси: {e}")
         return []
 
-    soup = BeautifulSoup(response.text, 'html.parser')
-    table = soup.find('table', {'class': 'table table-striped table-bordered'})
-    if not table:
+    try:
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table = soup.find('table', {'class': 'table table-striped table-bordered'})
+        if not table:
+            return []
+
+        proxies = []
+        for row in table.find_all('tr')[1:20]:  # Ограничим первые 20 прокси
+            cols = row.find_all('td')
+            if len(cols) >= 7 and cols[6].text.strip() == 'yes':  # Только HTTPS прокси
+                ip = cols[0].text.strip()
+                port = cols[1].text.strip()
+                proxies.append(f"http://{ip}:{port}")
+        
+        logging.info(f"Найдено {len(proxies)} прокси")
+        return proxies
+    except Exception as e:
+        logging.warning(f"Ошибка парсинга прокси: {e}")
         return []
 
-    proxies = []
-    for row in table.find_all('tr')[1:]:
-        cols = row.find_all('td')
-        if len(cols) >= 2:
-            ip = cols[0].text.strip()
-            port = cols[1].text.strip()
-            proxies.append(f"http://{ip}:{port}")
-    return proxies
-
-def retry_request(url, params=None, retries=5, delay=2):
-    proxies_list = find_proxy()
-    if not proxies_list:
-        proxies_list = [None]  
-
+def retry_request(url, params=None, retries=3, delay=1):
+    """Выполнение запроса с повторными попытками и прокси"""
+    
+    # Пробуем сначала без прокси
     for attempt in range(retries):
-        proxy = {'http': random.choice(proxies_list)} if proxies_list[0] else None
         try:
-            response = requests.get(url, params=params, proxies=proxy, timeout=10)
+            response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
             return response
         except Exception as e:
-            print(f"Попытка {attempt+1}/{retries} с прокси {proxy} не удалась: {e}")
+            logging.debug(f"Попытка {attempt+1}/{retries} без прокси не удалась: {e}")
             if attempt < retries - 1:
-                time.sleep(delay * (2 ** attempt))  # экспоненциальная задержка
+                time.sleep(delay * (attempt + 1))
+    
+    # Если не получилось без прокси, пробуем с прокси
+    proxies_list = find_proxy()
+    if proxies_list:
+        for attempt in range(retries):
+            proxy = random.choice(proxies_list)
+            proxy_dict = {'http': proxy, 'https': proxy}
+            try:
+                response = requests.get(url, params=params, proxies=proxy_dict, timeout=15)
+                response.raise_for_status()
+                return response
+            except Exception as e:
+                logging.debug(f"Попытка {attempt+1}/{retries} с прокси {proxy} не удалась: {e}")
+                if attempt < retries - 1:
+                    time.sleep(delay * (2 ** attempt))
+    
+    logging.error(f"Не удалось получить данные после всех попыток: {url}")
     return None
 
 def query(per_page, search_queries, area, period, pages_to_parse, search_field, skills_search):
-    frames = []  # инициализация
+    frames = []
+    
     for query_text in search_queries:
-        print(f"\nОбрабатываю запрос: '{query_text}'")
+        logging.info(f"Обрабатываю запрос: '{query_text}'")
+        
         for page in range(pages_to_parse):
-            print(f"Страница {page+1}/{pages_to_parse}")
+            logging.info(f"Страница {page+1}/{pages_to_parse}")
+            
             url = 'https://api.hh.ru/vacancies'
             params = {
                 'page': page,
@@ -62,136 +96,255 @@ def query(per_page, search_queries, area, period, pages_to_parse, search_field, 
                 'text': query_text,
                 'area': area,
                 'period': period,
-                'search_field': search_field  # исправлено
+                'search_field': search_field
             }
 
             response = retry_request(url, params=params)
             if response is None:
-                print("Не удалось получить данные страницы, пропускаем.")
+                logging.warning("Не удалось получить данные страницы, пропускаем.")
                 continue
 
-            data = response.json()
-            if not data.get('items'):
-                print("Вакансии не найдены.")
-                continue
+            try:
+                data = response.json()
+                if not data.get('items'):
+                    logging.info("Вакансии не найдены.")
+                    continue
 
-            for item in data['items']:
-                if skills_search:
-                    # запрос деталей вакансии для получения ключевых навыков
-                    vacancy_url = f"https://api.hh.ru/vacancies/{item['id']}"
-                    vac_response = retry_request(vacancy_url)
-                    if vac_response:
-                        vac_data = vac_response.json()
-                        skills = [skill['name'] for skill in vac_data.get('key_skills', [])]
-                        item['key_skills'] = ', '.join(skills)
+                for item in data['items']:
+                    if skills_search and item.get('id'):
+                        # Запрос деталей вакансии для получения ключевых навыков
+                        vacancy_url = f"https://api.hh.ru/vacancies/{item['id']}"
+                        vac_response = retry_request(vacancy_url)
+                        
+                        if vac_response:
+                            try:
+                                vac_data = vac_response.json()
+                                skills = [skill['name'] for skill in vac_data.get('key_skills', [])]
+                                item['key_skills'] = ', '.join(skills) if skills else None
+                            except:
+                                item['key_skills'] = None
+                        else:
+                            item['key_skills'] = None
                     else:
                         item['key_skills'] = None
-                else:
-                    item['key_skills'] = None  # или не добавлять поле
 
-                item['search_query'] = query_text
-                frames.append(item)
-                time.sleep(0.5)  # пауза между запросами (2 запроса в секунду)
+                    item['search_query'] = query_text
+                    frames.append(item)
+                    
+                    # Пауза между запросами (соблюдаем лимиты API)
+                    time.sleep(0.5)
+
+            except Exception as e:
+                logging.error(f"Ошибка обработки данных: {e}")
+                continue
 
     return frames
 
-
+def load_to_db(df):
+    DB_HOST = 'localhost'
+    DB_PORT = '5432'
+    DB_NAME = 'hh_api_data'
+    DB_USER = 'postgres'
+    DB_PASSWORD = 'simplepassword'
+    
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            host=DB_CONFIG['host'],
+            port=DB_CONFIG['port'],
+            dbname=DB_CONFIG['database'],
+            user=DB_CONFIG['user'],
+            password=DB_CONFIG['password']
+        )
+        
+        # Создание курсора
+        cur = conn.cursor()
+        
+        # Создание таблицы
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS vacancies (
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                published_at TIMESTAMP,
+                alternate_url TEXT,
+                employer_name TEXT,
+                area_name TEXT,
+                salary_from NUMERIC,
+                salary_to NUMERIC,
+                salary_currency VARCHAR(3),
+                salary_gross BOOLEAN,
+                experience_name TEXT,
+                employment_name TEXT,
+                schedule_name TEXT,
+                key_skills TEXT,
+                snippet TEXT
+            )
+        """)
+        
+        # Вставка данных построчно
+        successful = 0
+        failed = 0
+        
+        for _, row in df.iterrows():
+            try:
+                # Замена NaN на None
+                row_clean = row.replace({np.nan: None})
+                
+                cur.execute("""
+                    INSERT INTO vacancies (
+                        id, name, published_at, alternate_url, employer_name, 
+                        area_name, salary_from, salary_to, salary_currency, 
+                        salary_gross, experience_name, employment_name, 
+                        schedule_name, key_skills, snippet
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (id) DO NOTHING
+                """, (
+                    row_clean.get('id'),
+                    row_clean.get('name'),
+                    row_clean.get('published_at'),
+                    row_clean.get('alternate_url'),
+                    row_clean.get('employer_name'),
+                    row_clean.get('area_name'),
+                    row_clean.get('salary_from'),
+                    row_clean.get('salary_to'),
+                    row_clean.get('salary_currency'),
+                    row_clean.get('salary_gross'),
+                    row_clean.get('experience_name'),
+                    row_clean.get('employment_name'),
+                    row_clean.get('schedule_name'),
+                    row_clean.get('key_skills'),
+                    row_clean.get('snippet')
+                ))
+                successful += 1
+                
+            except psycopg2.Error as e:
+                failed += 1
+                logging.warning(f"Ошибка при вставке записи {row.get('id')}: {e}")
+        
+        # Фиксация изменений
+        conn.commit()
+        
+        logging.info(f"Загружено: {successful} записей, пропущено: {failed}")
+        
+        # Закрытие курсора
+        cur.close()
+        
+    except psycopg2.Error as e:
+        logging.error(f"Ошибка PostgreSQL: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 def df_main(frames, desired_columns=None):
     if not frames:
-        print("Нет данных для сохранения.")
+        logging.warning("Нет данных для сохранения.")
         return pd.DataFrame()
 
     df = pd.DataFrame(frames)
+    logging.info(f"Получено {len(df)} вакансий")
 
-    
+    # Нормализация вложенных словарей
     dict_columns = ['employer', 'area', 'salary', 'type', 'schedule', 'experience', 'employment']
+    
     for col in dict_columns:
         if col in df.columns:
-            
-            norm = pd.json_normalize(df[col].dropna().tolist())
-            if not norm.empty:
-                norm.columns = [f"{col}_{subcol}" for subcol in norm.columns]
-                df = df.drop(columns=[col]).join(norm, how='left')
+            try:
+                # Убираем пустые значения для нормализации
+                valid_data = df[df[col].notna()][col].tolist()
+                if valid_data:
+                    norm = pd.json_normalize(valid_data)
+                    if not norm.empty:
+                        norm.columns = [f"{col}_{subcol}" for subcol in norm.columns]
+                        df = df.drop(columns=[col]).join(norm, how='left')
+            except Exception as e:
+                logging.warning(f"Ошибка при нормализации колонки {col}: {e}")
 
-    
+    # Обработка профессиональных ролей
     if 'professional_roles' in df.columns:
-        df['professional_roles_id'] = df['professional_roles'].apply(
-            lambda x: x[0]['id'] if x and isinstance(x, list) and len(x) > 0 else None
-        )
-        df['professional_roles_name'] = df['professional_roles'].apply(
-            lambda x: x[0]['name'] if x and isinstance(x, list) and len(x) > 0 else None
-        )
-        df = df.drop(columns=['professional_roles'])
+        try:
+            df['professional_roles_id'] = df['professional_roles'].apply(
+                lambda x: x[0]['id'] if x and isinstance(x, list) and len(x) > 0 else None
+            )
+            df['professional_roles_name'] = df['professional_roles'].apply(
+                lambda x: x[0]['name'] if x and isinstance(x, list) and len(x) > 0 else None
+            )
+            df = df.drop(columns=['professional_roles'])
+        except Exception as e:
+            logging.warning(f"Ошибка при обработке professional_roles: {e}")
 
+    # Обработка сниппета - ИСПРАВЛЕНО!
+    if 'snippet' in df.columns:
+        def process_snippet(x):
+            if pd.isna(x) or x is None:
+                return None
+            if isinstance(x, dict):
+                requirement = x.get('requirement', '')
+                responsibility = x.get('responsibility', '')
+                if requirement is None:
+                    requirement = ''
+                if responsibility is None:
+                    responsibility = ''
+                return f"{requirement} {responsibility}".strip()
+            return str(x) if x is not None else None
+        
+        df['snippet'] = df['snippet'].apply(process_snippet)
+
+    # Выбор нужных колонок
     if desired_columns:
+        # Добавляем search_query в желаемые колонки, если его нет
+        if 'search_query' not in desired_columns:
+            desired_columns.append('search_query')
+            
         existing = [col for col in desired_columns if col in df.columns]
         df = df[existing]
-        print(f"Оставленные колонки: {existing}")
+        logging.info(f"Оставленные колонки: {existing}")
 
-    filename = f"vacancies_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    df.to_csv(filename, index=False)
-    print(f"✅ Данные сохранены в {filename}")
+    # Загрузка в БД
+    load_to_db(df)
+    
     return df
 
-
-per_page = 50
+# Параметры запроса
+per_page = 100
 search_queries = ['Аналитик']
-area = 1
-period = 1
-pages_to_parse = 1
-search_field = 'name'          
+area = 1  # Москва
+period = 30  # за последний день
+pages_to_parse = 10
+search_field = 'name'  # поиск по названию
 skills_search = True
 
-all_possible_columns = [
-    'id', 'premium', 'name', 'department', 'has_test', 'response_letter_required', 
-    'salary_range', 'address', 'response_url', 'sort_point_distance', 'published_at', 
-    'created_at', 'archived', 'apply_alternate_url', 'branding', 'show_logo_in_search', 
-    'show_contacts', 'insider_interview', 'url', 'alternate_url', 'relations', 
-    'snippet', 'contacts', 'working_days', 'working_time_intervals', 'working_time_modes', 
-    'accept_temporary', 'fly_in_fly_out_duration', 'work_format', 'working_hours', 
-    'work_schedule_by_days', 'accept_labor_contract', 'civil_law_contracts', 'night_shifts', 
-    'accept_incomplete_resumes', 'employment_form', 'internship', 'adv_response_url', 
-    'is_adv_vacancy', 'adv_context', 'key_skills', 'search_query', 'employer_id', 
-    'employer_name', 'employer_url', 'employer_alternate_url', 'employer_vacancies_url', 
-    'employer_country_id', 'employer_accredited_it_employer', 'employer_trusted', 
-    'employer_logo_urls.original', 'employer_logo_urls.90', 'employer_logo_urls.240', 
-    'employer_logo_urls', 'area_id', 'area_name', 'area_url', 'salary_from', 'salary_to', 
-    'salary_currency', 'salary_gross', 'type_id', 'type_name', 'schedule_id', 'schedule_name', 
-    'experience_id', 'experience_name', 'employment_id', 'employment_name', 
-    'professional_roles_id', 'professional_roles_name'
-]
-
-
+# Желаемые колонки
 desired_columns = [
-    'id',                          # уникальный идентификатор вакансии
-    'name',                        # название вакансии
-    'published_at',                # дата публикации
-    'created_at',                  # дата создания
-    'alternate_url',               # ссылка на вакансию
-    'employer_id',                 # id работодателя
-    'employer_name',               # название компании
-    'employer_trusted',            # доверенный работодатель
-    'area_name',                   # название региона
-    'salary_from',                 # зарплата от
-    'salary_to',                   # зарплата до
-    'salary_currency',             # валюта
-    'salary_gross',                # до вычета налогов или после
-    'experience_id',               # id требуемого опыта
-    'experience_name',             # требуемый опыт
-    'employment_id',               # id типа занятости
-    'employment_name',             # тип занятости
-    'schedule_id',                 # id графика работы
-    'schedule_name',               # график работы
-    'professional_roles_name',     # проф. роль
-    'key_skills',                  # ключевые навыки
-    'snippet',                     # требования/обязанности (кратко)
+    'id',
+    'name',
+    'published_at',
+    'alternate_url',
+    'employer_name',
+    'area_name',
+    'salary_from',
+    'salary_to',
+    'salary_currency',
+    'salary_gross',
+    'experience_name',
+    'employment_name',
+    'schedule_name',
+    'key_skills',
+    'snippet',
+    'search_query'
 ]
-result = query(per_page, search_queries, area, period, pages_to_parse, search_field, skills_search)
-df = df_main(result, desired_columns)
 
-
-
-
-
-
+# Основной запуск
+if __name__ == "__main__":
+    logging.info("Начало сбора данных")
+    result = query(per_page, search_queries, area, period, pages_to_parse, search_field, skills_search)
+    
+    if result:
+        df = df_main(result, desired_columns)
+        logging.info(f"Готово! Загружено {len(df)} вакансий")
+    else:
+        logging.error("Не удалось получить данные")
