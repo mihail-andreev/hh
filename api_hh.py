@@ -313,8 +313,8 @@ def df_main(frames, desired_columns=None):
 per_page = 100
 search_queries = ['Аналитик']
 area = 1  # Москва
-period = 30  # за последний день
-pages_to_parse = 10
+period = 1  # за последний день
+pages_to_parse = 1
 search_field = 'name'  # поиск по названию
 skills_search = True
 
